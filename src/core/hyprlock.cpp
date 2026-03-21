@@ -605,6 +605,11 @@ void CHyprlock::onKey(uint32_t key, bool down) {
 
         handleKeySym(SYM, composeStatus == XKB_COMPOSE_COMPOSED);
 
+        const auto fingerprintAuth = g_pAuth->getImpl(AUTH_IMPL_FINGERPRINT);
+        if (fingerprintAuth) {
+          ((CFingerprint*)fingerprintAuth.get())->startVerify();
+        }
+
         if (SYM == XKB_KEY_BackSpace || SYM == XKB_KEY_Delete) // keys allowed to repeat
             startKeyRepeat(SYM);
 

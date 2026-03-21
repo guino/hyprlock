@@ -56,6 +56,7 @@ void CFingerprint::init() {
         return;
     }
 
+    static const auto inputWakeOnly = g_pConfigManager->getValue<Hyprlang::INT>("auth:fingerprint:inputwakeonly");
     m_sDBUSState.login->getPropertyAsync("PreparingForSleep").onInterface(LOGIN_MANAGER).uponReplyInvoke([this](std::optional<sdbus::Error> e, sdbus::Variant preparingForSleep) {
         if (e) {
             Debug::log(WARN, "fprint: Failed getting value for PreparingForSleep: {}", e->what());
@@ -65,12 +66,13 @@ void CFingerprint::init() {
         // When entering sleep, the wake signal will trigger startVerify().
         if (m_sDBUSState.sleeping)
             return;
-        startVerify();
+        if (!*inputWakeOnly)
+            startVerify();
     });
     m_sDBUSState.login->uponSignal("PrepareForSleep").onInterface(LOGIN_MANAGER).call([this](bool start) {
         Debug::log(LOG, "fprint: PrepareForSleep (start: {})", start);
         m_sDBUSState.sleeping = start;
-        if (!m_sDBUSState.sleeping && !m_sDBUSState.verifying)
+        if (!*inputWakeOnly && !m_sDBUSState.sleeping && !m_sDBUSState.verifying)
             startVerify();
     });
 }
@@ -215,7 +217,6 @@ void CFingerprint::claimDevice() {
 }
 
 void CFingerprint::startVerify(bool isRetry) {
-    m_sDBUSState.verifying = true;
     if (!m_sDBUSState.device) {
         if (!createDeviceProxy())
             return;
@@ -223,6 +224,9 @@ void CFingerprint::startVerify(bool isRetry) {
         claimDevice();
         return;
     }
+    if (m_sDBUSState.verifying)
+      return;
+    m_sDBUSState.verifying = true;
     auto finger = "any"; // Any finger.
     m_sDBUSState.device->callMethodAsync("VerifyStart").onInterface(DEVICE).withArguments(finger).uponReplyInvoke([this, isRetry](std::optional<sdbus::Error> e) {
         if (e) {

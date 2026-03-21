@@ -21,6 +21,7 @@ class CFingerprint : public IAuthImplementation {
     virtual std::optional<std::string>  getLastFailText();
     virtual std::optional<std::string>  getLastPrompt();
     virtual void                        terminate();
+    void        startVerify(bool isRetry = false);
 
     std::shared_ptr<sdbus::IConnection> getConnection();
 
@@ -47,7 +48,6 @@ class CFingerprint : public IAuthImplementation {
 
     bool        createDeviceProxy();
     void        claimDevice();
-    void        startVerify(bool isRetry = false);
     bool        stopVerify();
     bool        releaseDevice();
 };
