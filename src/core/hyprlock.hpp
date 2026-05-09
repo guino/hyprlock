@@ -12,6 +12,7 @@
 #include <vector>
 #include <condition_variable>
 #include <optional>
+#include <string_view>
 
 #include <xkbcommon/xkbcommon.h>
 #include <xkbcommon/xkbcommon-compose.h>
@@ -26,13 +27,16 @@ struct SDMABUFModifier {
 
 class CHyprlock {
   public:
-    CHyprlock(const std::string& wlDisplay, const bool immediateRender, const int gracePeriod);
+    CHyprlock(std::string_view wlDisplay, const bool immediateRender, const int gracePeriod);
     ~CHyprlock();
 
     void                       run();
 
-    void                       unlock();
-    bool                       isUnlocked();
+    void                       fadeOutAndUnlock();
+
+    bool                       isFadingOutOrTerminating();
+    bool                       isTerminating();
+    bool                       isLockAquired();
 
     ASP<CTimer>                addTimer(const std::chrono::system_clock::duration& timeout, std::function<void(ASP<CTimer> self, void* data)> cb_, void* data, bool force = false);
     void                       processTimers();
@@ -77,16 +81,12 @@ class CHyprlock {
 
     xkb_layout_index_t               m_uiActiveLayout = 0;
 
-    bool                             m_bTerminate = false;
-
-    bool                             m_lockAquired = false;
-    bool                             m_bLocked     = false;
-
     bool                             m_bCapsLock = false;
     bool                             m_bNumLock  = false;
     bool                             m_bCtrl     = false;
 
-    bool                             m_bImmediateRender = false;
+    bool                             m_bImmediateRender   = false;
+    bool                             m_screencopyRequired = false;
 
     std::string                      m_sCurrentDesktop = "";
 
@@ -121,6 +121,10 @@ class CHyprlock {
     void        removeDmabufListener();
 
   private:
+    bool m_lockAquired        = false;
+    bool m_fadeOutOrTerminate = false;
+    bool m_bTerminate         = false;
+
     struct {
         wl_display*                      display     = nullptr;
         SP<CCWlRegistry>                 registry    = nullptr;
@@ -133,7 +137,8 @@ class CHyprlock {
     } m_sWaylandState;
 
     struct {
-        SP<CCExtSessionLockV1> lock = nullptr;
+        SP<CCExtSessionLockV1> lock   = nullptr;
+        bool                   locked = false;
     } m_sLockState;
 
     struct {

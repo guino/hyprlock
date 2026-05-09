@@ -24,7 +24,7 @@ void CSeatManager::registerSeat(SP<CCWlSeat> seat) {
 
     m_pXKBContext = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
     if (!m_pXKBContext)
-        Debug::log(ERR, "Failed to create xkb context");
+        Log::logger->log(Log::ERR, "Failed to create xkb context");
 
     m_pSeat->setCapabilities([this](CCWlSeat* r, wl_seat_capability caps) {
         if (caps & WL_SEAT_CAPABILITY_POINTER) {
@@ -42,9 +42,9 @@ void CSeatManager::registerSeat(SP<CCWlSeat> seat) {
                 if (std::chrono::system_clock::now() > g_pHyprlock->m_tGraceEnds)
                     return;
 
-                if (!g_pHyprlock->isUnlocked() && g_pHyprlock->m_vLastEnterCoords.distance({wl_fixed_to_double(surface_x), wl_fixed_to_double(surface_y)}) > 5) {
-                    Debug::log(LOG, "In grace and cursor moved more than 5px, unlocking!");
-                    g_pHyprlock->unlock();
+                if (!g_pHyprlock->isFadingOutOrTerminating() && g_pHyprlock->m_vLastEnterCoords.distance({wl_fixed_to_double(surface_x), wl_fixed_to_double(surface_y)}) > 5) {
+                    Log::logger->log(Log::INFO, "In grace and cursor moved more than 5px, unlocking!");
+                    g_pHyprlock->fadeOutAndUnlock();
                 }
             });
 
@@ -97,13 +97,13 @@ void CSeatManager::registerSeat(SP<CCWlSeat> seat) {
                     return;
 
                 if (format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1) {
-                    Debug::log(ERR, "Could not recognise keymap format");
+                    Log::logger->log(Log::ERR, "Could not recognise keymap format");
                     return;
                 }
 
                 const char* buf = (const char*)mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
                 if (buf == MAP_FAILED) {
-                    Debug::log(ERR, "Failed to mmap xkb keymap: {}", errno);
+                    Log::logger->log(Log::ERR, "Failed to mmap xkb keymap: {}", errno);
                     return;
                 }
 
@@ -113,20 +113,20 @@ void CSeatManager::registerSeat(SP<CCWlSeat> seat) {
                 close(fd);
 
                 if (!m_pXKBKeymap) {
-                    Debug::log(ERR, "Failed to compile xkb keymap");
+                    Log::logger->log(Log::ERR, "Failed to compile xkb keymap");
                     return;
                 }
 
                 m_pXKBState = xkb_state_new(m_pXKBKeymap);
                 if (!m_pXKBState) {
-                    Debug::log(ERR, "Failed to create xkb state");
+                    Log::logger->log(Log::ERR, "Failed to create xkb state");
                     return;
                 }
 
                 const auto PCOMOPOSETABLE = xkb_compose_table_new_from_locale(m_pXKBContext, setlocale(LC_CTYPE, nullptr), XKB_COMPOSE_COMPILE_NO_FLAGS);
 
                 if (!PCOMOPOSETABLE) {
-                    Debug::log(ERR, "Failed to create xkb compose table");
+                    Log::logger->log(Log::ERR, "Failed to create xkb compose table");
                     return;
                 }
 
@@ -163,7 +163,7 @@ void CSeatManager::registerSeat(SP<CCWlSeat> seat) {
         }
     });
 
-    m_pSeat->setName([](CCWlSeat* r, const char* name) { Debug::log(LOG, "Exposed seat name: {}", name ? name : "nullptr"); });
+    m_pSeat->setName([](CCWlSeat* r, const char* name) { Log::logger->log(Log::INFO, "Exposed seat name: {}", name ? name : "nullptr"); });
 }
 
 void CSeatManager::registerCursorShape(SP<CCWpCursorShapeManagerV1> shape) {

@@ -17,8 +17,8 @@ CSessionLockSurface::~CSessionLockSurface() {
         wl_egl_window_destroy(eglWindow);
 }
 
-CSessionLockSurface::CSessionLockSurface(const SP<COutput>& pOutput) : m_outputRef(pOutput), m_outputID(pOutput->m_ID) {
-    surface = makeShared<CCWlSurface>(g_pHyprlock->getCompositor()->sendCreateSurface());
+CSessionLockSurface::CSessionLockSurface(const SP<COutput>& pOutput) :
+    m_outputRef(pOutput), m_outputID(pOutput->m_ID), surface(makeShared<CCWlSurface>(g_pHyprlock->getCompositor()->sendCreateSurface())) {
     RASSERT(surface, "Couldn't create wl_surface");
 
     static const auto FRACTIONALSCALING = g_pConfigManager->getValue<Hyprlang::INT>("general:fractional_scaling");
@@ -33,7 +33,7 @@ CSessionLockSurface::CSessionLockSurface(const SP<COutput>& pOutput) : m_outputR
             const bool SAMESCALE = fractionalScale == scale / 120.0;
             fractionalScale      = scale / 120.0;
 
-            Debug::log(LOG, "Got fractional scale: {:.1f}%", fractionalScale * 100.F);
+            Log::logger->log(Log::INFO, "Got fractional scale: {:.1f}%", fractionalScale * 100.F);
 
             if (!SAMESCALE && readyForFrame)
                 onScaleUpdate();
@@ -43,9 +43,9 @@ CSessionLockSurface::CSessionLockSurface(const SP<COutput>& pOutput) : m_outputR
     }
 
     if (!PFRACTIONALMGR)
-        Debug::log(LOG, "No fractional-scale support! Oops, won't be able to scale!");
+        Log::logger->log(Log::INFO, "No fractional-scale support! Oops, won't be able to scale!");
     if (!PVIEWPORTER)
-        Debug::log(LOG, "No viewporter support! Oops, won't be able to scale!");
+        Log::logger->log(Log::INFO, "No viewporter support! Oops, won't be able to scale!");
 
     lockSurface = makeShared<CCExtSessionLockSurfaceV1>(g_pHyprlock->getSessionLock()->sendGetLockSurface(surface->resource(), pOutput->m_wlOutput->resource()));
     RASSERT(lockSurface, "Couldn't create ext_session_lock_surface_v1");
@@ -54,7 +54,7 @@ CSessionLockSurface::CSessionLockSurface(const SP<COutput>& pOutput) : m_outputR
 }
 
 void CSessionLockSurface::configure(const Vector2D& size_, uint32_t serial_) {
-    Debug::log(LOG, "configure with serial {}", serial_);
+    Log::logger->log(Log::INFO, "configure with serial {}", serial_);
 
     const bool SAMESERIAL = serial == serial_;
     const bool SAMESIZE   = logicalSize == size_;
@@ -78,23 +78,37 @@ void CSessionLockSurface::configure(const Vector2D& size_, uint32_t serial_) {
     if (!SAMESERIAL)
         lockSurface->sendAckConfigure(serial);
 
-    Debug::log(LOG, "Configuring surface for logical {} and pixel {}", logicalSize, size);
+    Log::logger->log(Log::INFO, "Configuring surface for logical {} and pixel {}", logicalSize, size);
 
     surface->sendDamageBuffer(0, 0, 0xFFFF, 0xFFFF);
 
-    if (!eglWindow) {
-        eglWindow = wl_egl_window_create((wl_surface*)surface->resource(), size.x, size.y);
-        RASSERT(eglWindow, "Couldn't create eglWindow");
-    } else
+    if (eglWindow && eglSurface) {
+        Log::logger->log(Log::INFO, "Resizing existing eglWindow");
         wl_egl_window_resize(eglWindow, size.x, size.y, 0, 0);
+    } else {
+        if (eglWindow)
+            wl_egl_window_destroy(eglWindow);
 
-    if (!eglSurface) {
-        eglSurface = g_pEGL->eglCreatePlatformWindowSurfaceEXT(g_pEGL->eglDisplay, g_pEGL->eglConfig, eglWindow, nullptr);
-        RASSERT(eglSurface, "Couldn't create eglSurface");
+        eglWindow = wl_egl_window_create((wl_surface*)surface->resource(), size.x, size.y);
+        if (!eglWindow) {
+            // Only fails when unable to allocate the wl_egl_window structure or size x or y is <= 0.
+            Log::logger->log(Log::CRIT, "Failed to create wayland egl window");
+            readyForFrame = false;
+            return;
+        }
+
+        if (eglSurface)
+            eglDestroySurface(g_pEGL->eglDisplay, eglSurface);
+
+        eglSurface = g_pEGL->createPlatformWindowSurfaceEXT(eglWindow);
+        if (eglSurface == EGL_NO_SURFACE) {
+            readyForFrame = false;
+            return;
+        }
     }
 
     if (readyForFrame && !(SAMESIZE && SAMESCALE)) {
-        Debug::log(LOG, "output {} changed, reloading widgets!", POUTPUT->stringPort);
+        Log::logger->log(Log::INFO, "output {} changed, reloading widgets!", POUTPUT->stringPort);
         g_pRenderer->reconfigureWidgetsFor(POUTPUT->m_ID);
     }
 
@@ -117,12 +131,12 @@ void CSessionLockSurface::render() {
     const auto FEEDBACK = g_pRenderer->renderLock(*this);
     frameCallback       = makeShared<CCWlCallback>(surface->sendFrame());
     frameCallback->setDone([this](CCWlCallback* r, uint32_t frameTime) {
-        if (g_pHyprlock->m_bTerminate)
+        if (g_pHyprlock->isTerminating())
             return;
 
-        if (Debug::verbose) {
+        if (Log::logger->verbose()) {
             const auto POUTPUT = m_outputRef.lock();
-            Debug::log(TRACE, "[{}] frame {}, Current fps: {:.2f}", POUTPUT->stringPort, m_frames, 1000.f / (frameTime - m_lastFrameTime));
+            Log::logger->log(Log::TRACE, "[{}] frame {}, Current fps: {:.2f}", POUTPUT->stringPort, m_frames, 1000.f / (frameTime - m_lastFrameTime));
         }
 
         m_lastFrameTime = frameTime;
@@ -132,7 +146,11 @@ void CSessionLockSurface::render() {
         onCallback();
     });
 
-    eglSwapBuffers(g_pEGL->eglDisplay, eglSurface);
+    if (!g_pEGL->swapBuffers(eglSurface)) {
+        frameCallback.reset();
+        needsFrame = true;
+        return;
+    }
 
     needsFrame = FEEDBACK.needsFrame || g_pAnimationManager->shouldTickForNext();
 }
@@ -140,7 +158,7 @@ void CSessionLockSurface::render() {
 void CSessionLockSurface::onCallback() {
     frameCallback.reset();
 
-    if (needsFrame && !g_pHyprlock->m_bTerminate && g_pEGL) {
+    if (needsFrame && !g_pHyprlock->isTerminating() && g_pEGL) {
         needsFrame = false;
         render();
     }
