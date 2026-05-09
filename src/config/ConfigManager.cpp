@@ -9,7 +9,7 @@
 #include <filesystem>
 #include <glob.h>
 #include <cstring>
-#include <mutex>
+#include <format>
 
 using namespace Hyprutils::String;
 using namespace Hyprutils::Animation;
@@ -89,7 +89,12 @@ static Hyprlang::CParseResult configHandleLayoutOption(const char* v, void** dat
         rhs.pop_back();
     }
 
-    DATA->m_vValues = Hyprutils::Math::Vector2D{std::stof(lhs), std::stof(rhs)};
+    try {
+        DATA->m_vValues = Hyprutils::Math::Vector2D{std::stof(lhs), std::stof(rhs)};
+    } catch (const std::exception&) {
+        result.setError(std::format("invalid layout values: {}", VALUE).c_str());
+        return result;
+    }
 
     return result;
 }
@@ -130,7 +135,7 @@ static Hyprlang::CParseResult configHandleGradientSet(const char* VALUE, void** 
             try {
                 DATA->m_fAngle = std::stoi(var.substr(0, var.find("deg"))) * (M_PI / 180.0); // radians
             } catch (...) {
-                Debug::log(WARN, "Error parsing gradient {}", V);
+                Log::logger->log(Log::WARN, "Error parsing gradient {}", V);
                 parseError = "Error parsing gradient " + V;
             }
 
@@ -139,7 +144,7 @@ static Hyprlang::CParseResult configHandleGradientSet(const char* VALUE, void** 
             rolling = trim(rolling.substr(LAST ? rolling.length() : SPACEPOS + 1));
 
         if (DATA->m_vColors.size() >= 10) {
-            Debug::log(WARN, "Error parsing gradient {}: max colors is 10.", V);
+            Log::logger->log(Log::WARN, "Error parsing gradient {}: max colors is 10.", V);
             parseError = "Error parsing gradient " + V + ": max colors is 10.";
             break;
         }
@@ -150,7 +155,7 @@ static Hyprlang::CParseResult configHandleGradientSet(const char* VALUE, void** 
         try {
             DATA->m_vColors.emplace_back(configStringToInt(var));
         } catch (std::exception& e) {
-            Debug::log(WARN, "Error parsing gradient {}", V);
+            Log::logger->log(Log::WARN, "Error parsing gradient {}", V);
             parseError = "Error parsing gradient " + V + ": " + e.what();
         }
     }
@@ -161,7 +166,7 @@ static Hyprlang::CParseResult configHandleGradientSet(const char* VALUE, void** 
     }
 
     if (DATA->m_vColors.size() == 0) {
-        Debug::log(WARN, "Error parsing gradient {}", V);
+        Log::logger->log(Log::WARN, "Error parsing gradient {}", V);
         parseError = "Error parsing gradient " + V + ": No colors?";
 
         DATA->m_vColors.emplace_back(0); // transparent
@@ -181,17 +186,40 @@ static void configHandleGradientDestroy(void** data) {
         delete reinterpret_cast<CGradientValueData*>(*data);
 }
 
-static std::string getMainConfigPath() {
-    static const auto paths = Hyprutils::Path::findConfig("hyprlock");
-    if (paths.first.has_value())
-        return paths.first.value();
+static std::expected<std::string, std::string> getMainConfigPath() {
+    static const auto PATHS = Hyprutils::Path::findConfig("hyprlock");
+    if (PATHS.first.has_value())
+        return PATHS.first.value();
     else
-        throw std::runtime_error("Could not find config in HOME, XDG_CONFIG_HOME, XDG_CONFIG_DIRS or /etc/hypr.");
+        return std::unexpected{"Could not find config. Searched in order: XDG_CONFIG_HOME, HOME, XDG_CONFIG_DIRS, /etc/xdg"};
 }
 
-CConfigManager::CConfigManager(std::string configPath) :
-    m_config(configPath.empty() ? getMainConfigPath().c_str() : configPath.c_str(), Hyprlang::SConfigOptions{.throwAllErrors = true, .allowMissingConfig = configPath.empty()}) {
-    configCurrentPath = configPath.empty() ? getMainConfigPath() : configPath;
+std::expected<std::string, std::string> CConfigManager::resolveConfigPath(std::optional<std::string_view> explicitPath) {
+    std::string configPath = "";
+    if (explicitPath.has_value()) {
+        configPath = explicitPath.value();
+        configPath = absolutePath(configPath, "");
+    } else {
+        auto mainConfigPath = getMainConfigPath();
+        if (!mainConfigPath.has_value())
+            return std::unexpected{mainConfigPath.error()};
+
+        configPath = mainConfigPath.value();
+    }
+
+    if (!std::filesystem::exists(configPath))
+        return std::unexpected{std::vformat("No config file at \"{}\"", std::make_format_args(configPath))};
+
+    return configPath;
+}
+
+CConfigManager::CConfigManager(const char* configPath) :
+    m_configCurrentPath(configPath), m_config(configPath,
+                                              Hyprlang::SConfigOptions{
+                                                  .throwAllErrors     = true,
+                                                  .allowMissingConfig = false,
+                                              }) {
+    ;
 }
 
 inline static constexpr auto GRADIENTCONFIG = [](const char* default_value) -> Hyprlang::CUSTOMTYPE {
@@ -304,6 +332,7 @@ void CConfigManager::init() {
     m_config.addSpecialConfigValue("input-field", "check_color", GRADIENTCONFIG("0xFF22CC88"));
     m_config.addSpecialConfigValue("input-field", "fail_color", GRADIENTCONFIG("0xFFCC2222"));
     m_config.addSpecialConfigValue("input-field", "fail_text", Hyprlang::STRING{"<i>$FAIL</i>"});
+    m_config.addSpecialConfigValue("input-field", "check_text", Hyprlang::STRING{""});
     m_config.addSpecialConfigValue("input-field", "capslock_color", GRADIENTCONFIG(""));
     m_config.addSpecialConfigValue("input-field", "numlock_color", GRADIENTCONFIG(""));
     m_config.addSpecialConfigValue("input-field", "bothlock_color", GRADIENTCONFIG(""));
@@ -359,7 +388,7 @@ void CConfigManager::init() {
     auto result = m_config.parse();
 
     if (result.error)
-        Debug::log(ERR, "Config has errors:\n{}\nProceeding ignoring faulty entries", result.getError());
+        Log::logger->log(Log::ERR, "Config has errors:\n{}\nProceeding ignoring faulty entries", result.getError());
 
 #undef SHADOWABLE
 #undef CLICKABLE
@@ -370,11 +399,10 @@ std::vector<CConfigManager::SWidgetConfig> CConfigManager::getWidgetConfigs() {
 
 #define SHADOWABLE(name)                                                                                                                                                           \
     {"shadow_size", m_config.getSpecialConfigValue(name, "shadow_size", k.c_str())}, {"shadow_passes", m_config.getSpecialConfigValue(name, "shadow_passes", k.c_str())},          \
-        {"shadow_color", m_config.getSpecialConfigValue(name, "shadow_color", k.c_str())}, {                                                                                       \
-        "shadow_boost", m_config.getSpecialConfigValue(name, "shadow_boost", k.c_str())                                                                                            \
-    }
+        {"shadow_color", m_config.getSpecialConfigValue(name, "shadow_color", k.c_str())}, {"shadow_boost", m_config.getSpecialConfigValue(name, "shadow_boost", k.c_str())}
 
-#define CLICKABLE(name) {"onclick", m_config.getSpecialConfigValue(name, "onclick", k.c_str())}
+#define CLICKABLE(name)                                                                                                                                                            \
+    { "onclick", m_config.getSpecialConfigValue(name, "onclick", k.c_str()) }
 
     //
     auto keys = m_config.listKeysForSpecialCategory("background");
@@ -486,6 +514,7 @@ std::vector<CConfigManager::SWidgetConfig> CConfigManager::getWidgetConfigs() {
                 {"check_color", m_config.getSpecialConfigValue("input-field", "check_color", k.c_str())},
                 {"fail_color", m_config.getSpecialConfigValue("input-field", "fail_color", k.c_str())},
                 {"fail_text", m_config.getSpecialConfigValue("input-field", "fail_text", k.c_str())},
+                {"check_text", m_config.getSpecialConfigValue("input-field", "check_text", k.c_str())},
                 {"capslock_color", m_config.getSpecialConfigValue("input-field", "capslock_color", k.c_str())},
                 {"numlock_color", m_config.getSpecialConfigValue("input-field", "numlock_color", k.c_str())},
                 {"bothlock_color", m_config.getSpecialConfigValue("input-field", "bothlock_color", k.c_str())},
@@ -527,45 +556,45 @@ std::vector<CConfigManager::SWidgetConfig> CConfigManager::getWidgetConfigs() {
 
 std::optional<std::string> CConfigManager::handleSource(const std::string& command, const std::string& rawpath) {
     if (rawpath.length() < 2) {
-        Debug::log(ERR, "source= path garbage");
+        Log::logger->log(Log::ERR, "source= path garbage");
         return "source path " + rawpath + " bogus!";
     }
     std::unique_ptr<glob_t, void (*)(glob_t*)> glob_buf{new glob_t, [](glob_t* g) { globfree(g); }};
     memset(glob_buf.get(), 0, sizeof(glob_t));
 
-    const auto CURRENTDIR = std::filesystem::path(configCurrentPath).parent_path().string();
+    const auto CURRENTDIR = std::filesystem::path(m_configCurrentPath).parent_path().string();
 
     if (auto r = glob(absolutePath(rawpath, CURRENTDIR).c_str(), GLOB_TILDE, nullptr, glob_buf.get()); r != 0) {
         std::string err = std::format("source= globbing error: {}", r == GLOB_NOMATCH ? "found no match" : GLOB_ABORTED ? "read error" : "out of memory");
-        Debug::log(ERR, "{}", err);
+        Log::logger->log(Log::ERR, "{}", err);
         return err;
     }
 
     for (size_t i = 0; i < glob_buf->gl_pathc; i++) {
         const auto PATH = absolutePath(glob_buf->gl_pathv[i], CURRENTDIR);
 
-        if (PATH.empty() || PATH == configCurrentPath) {
-            Debug::log(WARN, "source= skipping invalid path");
+        if (PATH.empty() || PATH == m_configCurrentPath) {
+            Log::logger->log(Log::WARN, "source= skipping invalid path");
             continue;
         }
 
         if (!std::filesystem::is_regular_file(PATH)) {
             if (std::filesystem::exists(PATH)) {
-                Debug::log(WARN, "source= skipping non-file {}", PATH);
+                Log::logger->log(Log::WARN, "source= skipping non-file {}", PATH);
                 continue;
             }
 
-            Debug::log(ERR, "source= file doesnt exist");
+            Log::logger->log(Log::ERR, "source= file doesnt exist");
             return "source file " + PATH + " doesn't exist!";
         }
 
         // allow for nested config parsing
-        auto backupConfigPath = configCurrentPath;
-        configCurrentPath     = PATH;
+        auto backupConfigPath = m_configCurrentPath;
+        m_configCurrentPath   = PATH;
 
         m_config.parseFile(PATH.c_str());
 
-        configCurrentPath = backupConfigPath;
+        m_configCurrentPath = backupConfigPath;
     }
 
     return {};
@@ -578,19 +607,21 @@ std::optional<std::string> CConfigManager::handleBezier(const std::string& comma
 
     if (ARGS[1] == "")
         return "too few arguments";
-    float p1x = std::stof(ARGS[1]);
-
     if (ARGS[2] == "")
         return "too few arguments";
-    float p1y = std::stof(ARGS[2]);
-
     if (ARGS[3] == "")
         return "too few arguments";
-    float p2x = std::stof(ARGS[3]);
-
     if (ARGS[4] == "")
         return "too few arguments";
-    float p2y = std::stof(ARGS[4]);
+
+    float p1x, p1y, p2x, p2y;
+
+    try {
+        p1x = std::stof(ARGS[1]);
+        p1y = std::stof(ARGS[2]);
+        p2x = std::stof(ARGS[3]);
+        p2y = std::stof(ARGS[4]);
+    } catch (const std::exception&) { return "invalid bezier arguments"; }
 
     if (ARGS[5] != "")
         return "too many arguments";
@@ -599,7 +630,6 @@ std::optional<std::string> CConfigManager::handleBezier(const std::string& comma
 
     return {};
 }
-
 std::optional<std::string> CConfigManager::handleAnimation(const std::string& command, const std::string& args) {
     const auto ARGS = CVarList(args);
 
